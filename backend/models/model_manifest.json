@@ -1,0 +1,26 @@
+{
+  "model_type": "hybrid_user_item_collaborative_filtering",
+  "artifact": "models/ecommerce_recommender.joblib",
+  "metrics_report": "reports/training_metrics.json",
+  "dataset": {
+    "users": 720,
+    "products": 560,
+    "interactions": 10663,
+    "domains": [
+      "beauty",
+      "books",
+      "electronics",
+      "fashion",
+      "grocery",
+      "home",
+      "marketplace",
+      "sports"
+    ]
+  },
+  "metrics": {
+    "precision_at_k": 0.0819,
+    "recall_at_k": 0.4097,
+    "map_at_k": 0.1952,
+    "coverage": 0.8946
+  }
+}
