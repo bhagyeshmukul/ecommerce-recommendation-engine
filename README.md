@@ -8,7 +8,65 @@ The model learns from real historical purchases: customers with similar purchase
 
 [Mobile preview](docs/screenshots/mobile.png)
 
-## Run the complete demo
+## Run locally without Docker
+
+Prerequisites: **Python 3.14** and native **PostgreSQL 16**. On macOS, download the PostgreSQL 16 build of [Postgres.app](https://postgresapp.com/downloads.html) into `~/Applications` or `/Applications`. On supported Homebrew installations, `brew install postgresql@16` also works. The launcher detects those binaries; `LOCAL_PG_BIN` supports another installation directory.
+
+From the project root:
+
+```bash
+./scripts/local.sh          # Start PostgreSQL and FastAPI in this terminal
+./scripts/local.sh status   # Check them from another terminal
+./scripts/local.sh stop     # Stop the project's local services
+```
+
+Open **http://127.0.0.1:8000/docs** for the API and **http://127.0.0.1:8000/ready** for readiness. Press **Ctrl+C** in the launcher terminal to stop its services while retaining the database.
+
+The launcher creates/reuses `.venv`, installs missing or changed pinned dependencies, reuses the prepared model, and trains only when artifacts are missing or `--retrain` is requested. It initializes a dedicated PostgreSQL cluster, applies migrations, seeds matching purchases, and starts FastAPI. Ordinary restarts do not retrain or duplicate purchases.
+
+Runtime files are kept under gitignored **`.runtime/local/`**:
+
+- `pgdata/`: persistent database files.
+- `db-password` and `pgpass`: generated local credentials; keep these with the cluster.
+- `api.log` and `postgres.log`: service logs.
+- `state.json`, `owner.json` and `launcher.lock`: process/configuration ownership and duplicate-launch protection.
+
+Both services bind to `127.0.0.1`. PostgreSQL defaults to **55433**, separate from Docker's **55432**. The script supplies its own database connection settings to migrations, seeding and the API. It does not use the Docker database or call Docker commands.
+
+| Environment variable | Default / purpose |
+| --- | --- |
+| `LOCAL_API_PORT` | `8000` |
+| `LOCAL_PG_PORT` | `55433` |
+| `LOCAL_PG_BIN` | Auto-detected directory containing PostgreSQL 16 binaries |
+| `LOCAL_PYTHON` | Project `.venv/bin/python`, otherwise Python 3.14 for venv creation; an explicit override should point to your prepared environment |
+| `LOCAL_RUNTIME_DIR` | `.runtime/local/`; a separate dedicated directory can isolate another run |
+
+The script refuses occupied ports or another project's runtime. If the Docker demo is already running, stop it first with `docker compose stop`, or choose a free API port:
+
+```bash
+LOCAL_API_PORT=8001 ./scripts/local.sh
+./scripts/local.sh --retrain  # Explicitly regenerate/evaluate the model when needed
+# Inspect request/server logs:
+tail -f .runtime/local/api.log
+```
+
+An already running PostgreSQL instance in this project's cluster is reused and left running when that launcher exits. `stop` explicitly stops the project-local cluster. Unrelated services and existing database contents are preserved. An incomplete or mismatched cluster produces an actionable error instead of being automatically erased.
+
+The frontend runs separately with Node 24:
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+If using API port 8001 alongside the Docker demo, start a separate frontend port as well:
+
+```bash
+API_PROXY_TARGET=http://127.0.0.1:8001 npm run dev -- --port 5174
+```
+
+## Run the complete demo with Docker
 
 Prerequisites: Docker Desktop / Docker Engine with Compose, an internet connection for the first download, and available ports **5173**, **8000**, and **55432**.
 
@@ -139,34 +197,23 @@ curl 'http://localhost:8000/metrics'
 
 ## Develop locally
 
-Use **Python 3.14** and **Node 24**. The pinned scientific dependencies replace the original Python-incompatible package set.
+Use **Python 3.14**, native **PostgreSQL 16**, and **Node 24** for the frontend. Start the backend/database with `./scripts/local.sh`, then run `npm ci` and `npm run dev` from `frontend/` in another terminal. See the native setup section above for installation, logs, process control and port overrides.
 
-```bash
-python3.14 -m venv .venv
-source .venv/bin/activate
-pip install --only-binary=:all: -r backend/requirements.txt
-# Start only PostgreSQL in Docker:
-docker compose up -d --wait postgres
-cd backend
-python -m src.train_model
-alembic upgrade head
-python -m src.seed_database
-uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
+The frontend defaults to `/api`; Vite proxies to `http://127.0.0.1:8000` locally and `http://backend:8000` in Compose. `VITE_API_BASE_URL` can point to a different API when building; direct browser origins must also be allowed by backend CORS. `CORS_ORIGINS` is inherited by the local launcher. See `.env.example` for configuration examples.
 
-In another terminal:
-
-```bash
-cd frontend
-npm ci
-npm run dev
-```
-
-Local PostgreSQL defaults to port 55432. `DATABASE_URL`, `MODEL_BUNDLE_DIR` and `CORS_ORIGINS` configure the host API. The frontend defaults to `/api`; Vite proxies to `http://127.0.0.1:8000` locally and `http://backend:8000` in Compose. `VITE_API_BASE_URL` can point to a different API when building; direct browser origins must also be allowed by backend CORS. See `.env.example` for defaults.
-
-To retrain, stop the API, run the training command, and restart it with the matching snapshot. Repeating training on identical source data, Python version and package versions keeps the model identity stable. Changing the processed dataset requires a matching fresh demo database; the seeder deliberately does not silently replace historical rows.
+To retrain, stop the local launcher and run `./scripts/local.sh --retrain`. Repeating training on identical source data, Python version and package versions keeps the model identity stable. Changing the processed dataset requires a matching fresh dedicated database; the seeder deliberately does not silently replace historical rows.
 
 ## Tests
+
+Native launcher checks run from the project root:
+
+```bash
+.venv/bin/python -m pytest scripts/tests -q
+# Include real native startup, Ctrl+C, retained data, restart and stop:
+RUN_NATIVE_LOCAL_TESTS=1 .venv/bin/python -m pytest scripts/tests -q
+```
+
+The native integration case requires PostgreSQL 16 and an already prepared model. It uses temporary runtime files and free ports, leaving the normal local cluster alone. CI also exercises this path on Linux without a database container.
 
 ```bash
 # From backend/, with the project environment active:

@@ -21,3 +21,4 @@ backend/models/bundle/
 backend/reports/*.json
 !backend/reports/training_metrics.json
 *.egg-info/
+.runtime/

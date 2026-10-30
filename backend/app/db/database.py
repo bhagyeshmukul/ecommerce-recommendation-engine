@@ -16,7 +16,7 @@ DATABASE_URL = os.getenv(
 )
 
 # A stale pooled connection is checked before reuse. SQLite is useful for isolated
-# unit tests; the supported full demo and migration checks use PostgreSQL.
+# unit tests; both native and Docker demos and migration checks use PostgreSQL.
 options = {"pool_pre_ping": True}
 if DATABASE_URL.startswith("sqlite"):
     options["connect_args"] = {"check_same_thread": False}

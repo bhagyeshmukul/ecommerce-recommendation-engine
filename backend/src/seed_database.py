@@ -48,7 +48,7 @@ def seed_database(
         for table in [User, Product, UserInteraction]
     ):
         raise RuntimeError(
-            "Database contains other data. Use the separate v2 demo volume; existing rows were preserved."
+            "Database contains other data. Use a fresh dedicated demo database; existing rows were preserved."
         )
     path = data_dir / "processed" / "purchases.csv"
     if (

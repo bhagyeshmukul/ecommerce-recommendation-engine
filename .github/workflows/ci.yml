@@ -78,3 +78,30 @@ jobs:
       - name: Print API logs on failure
         if: failure()
         run: cat /tmp/retail-api.log 2>/dev/null || true
+
+  native:
+    name: Native PostgreSQL launcher
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      LOCAL_PG_BIN: /usr/lib/postgresql/16/bin
+      RUN_NATIVE_LOCAL_TESTS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install native PostgreSQL and Python dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16
+          python -m pip install --only-binary=:all: -r backend/requirements.txt
+      - name: Prepare the real-data model
+        working-directory: backend
+        run: python -m src.train_model
+      - name: Verify native startup, Ctrl+C, restart and stop
+        run: python -m pytest scripts/tests -q
