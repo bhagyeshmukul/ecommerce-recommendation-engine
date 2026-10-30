@@ -1,26 +1,55 @@
 {
-  "model_type": "hybrid_user_item_collaborative_filtering",
-  "artifact": "models/ecommerce_recommender.joblib",
-  "metrics_report": "reports/training_metrics.json",
-  "dataset": {
-    "users": 720,
-    "products": 560,
-    "interactions": 10663,
-    "domains": [
-      "beauty",
-      "books",
-      "electronics",
-      "fashion",
-      "grocery",
-      "home",
-      "marketplace",
-      "sports"
-    ]
+  "model_version": "f24714941393cb5c",
+  "identity": {
+    "dataset_sha256": "6b848e5a3b75b970f15e941ca90d9fe4a7a0f1aec65d972ca282d3dc9c2b019f",
+    "algorithm": "user_cosine_knn_v1",
+    "neighbors": 50,
+    "versions": {
+      "pandas": "3.1.0",
+      "numpy": "2.5.4",
+      "scipy": "1.18.1",
+      "scikit-learn": "1.9.1",
+      "joblib": "1.6.0"
+    },
+    "python": "3.14.0"
   },
-  "metrics": {
-    "precision_at_k": 0.0819,
-    "recall_at_k": 0.4097,
-    "map_at_k": 0.1952,
-    "coverage": 0.8946
+  "dataset": {
+    "name": "UCI Online Retail",
+    "source_url": "https://archive.ics.uci.edu/dataset/352/online-retail",
+    "download_url": "https://archive.ics.uci.edu/static/public/352/online+retail.zip",
+    "license": "CC BY 4.0",
+    "citation": "Chen, D. (2015). Online Retail. DOI: 10.24432/C5BW33",
+    "pipeline_version": "uci-purchases-v1",
+    "raw_sha256": "43465a06f2ccf7c8b5bd2892bc7defb52f97487934fe93b16ae4c3936424676d",
+    "dataset_sha256": "6b848e5a3b75b970f15e941ca90d9fe4a7a0f1aec65d972ca282d3dc9c2b019f",
+    "processed_sha256": "6872d62b133477b53d6e312c5fa316c2831071a4875998995b5e1e19ec3de6a9",
+    "date_start": "2010-12-01T08:26:00",
+    "date_end": "2011-12-09T12:50:00",
+    "quality": {
+      "raw_rows": 541909,
+      "missing_identifiers_or_description": 135080,
+      "blank_identifiers_or_description": 0,
+      "invalid_dates": 0,
+      "cancelled_lines": 8905,
+      "nonpositive_or_invalid_quantity_price": 40,
+      "non_merchandise_lines": 1547,
+      "exact_duplicate_lines": 5187,
+      "merged_invoice_product_lines": 4824,
+      "purchase_events": 386326,
+      "users": 4334,
+      "products": 3659
+    }
+  },
+  "serving": {
+    "fit_on": "all_cleaned_history",
+    "history_end": "2011-12-09T12:50:00",
+    "users": 4334,
+    "products": 3659,
+    "neighbors": 50,
+    "weight": "log1p(distinct purchase invoices), L2 normalized"
+  },
+  "files": {
+    "recommender.joblib": "5b6137882254017ff4b948b9ccb757ca543ef922e4edabd39f518c2096033fac",
+    "evaluation.json": "3250e7b4e0d3de9898b8b3665b12a9ddaaf9f949c85f780daa06381300764096"
   }
 }

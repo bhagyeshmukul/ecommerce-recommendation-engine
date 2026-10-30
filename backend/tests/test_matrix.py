@@ -1,19 +1,26 @@
-import pandas as pd
+"""Check purchase weighting and sparse representation using hand-computed values."""
 
+import numpy as np
+import pandas as pd
+import pytest
+from scipy.sparse import issparse
 from src.preprocessing import create_user_item_matrix
 
 
-def test_user_item_matrix_creation():
-    interactions = pd.DataFrame(
-        [
-            {"user_id": "U1", "product_id": "P1", "interaction_type": "view", "interaction_score": 1, "timestamp": "2026-01-01"},
-            {"user_id": "U1", "product_id": "P1", "interaction_type": "click", "interaction_score": 2, "timestamp": "2026-01-02"},
-            {"user_id": "U2", "product_id": "P2", "interaction_type": "purchase", "interaction_score": 5, "timestamp": "2026-01-03"},
-        ]
-    )
+def test_repeat_invoices_count_once_and_quantity_does_not_weight(purchases):
+    repeated = purchases.iloc[[0]].copy()
+    repeated["quantity"] = 10000
+    new_invoice = repeated.assign(invoice_id="NEW")
+    matrix = create_user_item_matrix(pd.concat([purchases, repeated, new_invoice]))
+    assert issparse(matrix.values)
+    assert matrix.values[0, 0] == pytest.approx(np.log1p(2))
+    assert matrix.values[0, 1] == pytest.approx(np.log1p(1))
+    assert np.linalg.norm(matrix.normalized[0].toarray()) == pytest.approx(1)
+    assert matrix.values[0, 4] == 0
 
-    matrix = create_user_item_matrix(interactions)
 
-    assert matrix.loc["U1", "P1"] == 3
-    assert matrix.loc["U2", "P2"] == 5
-    assert matrix.loc["U1", "P2"] == 0
+def test_empty_or_missing_ids_rejected(purchases):
+    with pytest.raises(ValueError):
+        create_user_item_matrix(purchases.iloc[:0])
+    with pytest.raises(ValueError):
+        create_user_item_matrix(purchases.assign(user_id=None))

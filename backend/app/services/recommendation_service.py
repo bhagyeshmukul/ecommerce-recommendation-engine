@@ -1,84 +1,126 @@
-from __future__ import annotations
+"""Verified bundle loading and the thin boundary between model and persistence."""
 
-from functools import lru_cache
+from __future__ import annotations
+import importlib.metadata
+import json
+from dataclasses import dataclass
 from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db import models
-from app.schemas.recommendation_schema import RecommendedProduct
-from src.data_loader import load_or_generate_dataset
-from src.evaluate import evaluate_recommender
+from app.db.models import DatasetSnapshot, Product, RecommendationLog, UserInteraction
+from src.data_loader import sha256_file
 from src.recommender import EcommerceRecommender
+from src.train_model import BUNDLE_DIR
 from src.utils import load_model
 
 
-ROOT = Path(__file__).resolve().parents[2]
-MODEL_PATH = ROOT / "models" / "ecommerce_recommender.joblib"
+@dataclass
+class ModelBundle:
+    model: EcommerceRecommender
+    manifest: dict
+    metrics: dict
 
 
-@lru_cache(maxsize=1)
-def get_recommender() -> EcommerceRecommender:
-    if MODEL_PATH.exists():
-        return load_model(MODEL_PATH)
-    _, products, interactions = load_or_generate_dataset()
-    return EcommerceRecommender(interactions, products)
+def load_bundle(directory: Path = BUNDLE_DIR) -> ModelBundle:
+    """Reject incomplete, corrupted or incompatible bundles before accepting traffic."""
+    manifest_path = directory / "manifest.json"
+    if not manifest_path.exists():
+        raise RuntimeError(
+            "Model missing. Run python -m src.train_model, then python -m src.seed_database."
+        )
+    manifest = json.loads(manifest_path.read_text())
+    for filename in ["recommender.joblib", "evaluation.json"]:
+        path = directory / filename
+        if not path.exists() or sha256_file(path) != manifest["files"][filename]:
+            raise RuntimeError(
+                f"Bundle checksum mismatch: {filename}. Retrain before serving."
+            )
+    for package, expected in manifest["identity"]["versions"].items():
+        if importlib.metadata.version(package) != expected:
+            raise RuntimeError(
+                f"{package} differs from the training environment. Install requirements.txt and retrain."
+            )
+    model = load_model(directory / "recommender.joblib")
+    metrics = json.loads((directory / "evaluation.json").read_text())
+    if (
+        model.model_version != manifest["model_version"]
+        or metrics["model_version"] != model.model_version
+        or metrics["dataset_sha256"] != manifest["dataset"]["dataset_sha256"]
+    ):
+        raise RuntimeError("Model, manifest and evaluation identities disagree")
+    return ModelBundle(model, manifest, metrics)
 
 
-@lru_cache(maxsize=1)
-def get_metrics() -> dict[str, float]:
-    _, products, interactions = load_or_generate_dataset()
-    return evaluate_recommender(interactions, products, k=5)
+def verify_snapshot(db: Session, bundle: ModelBundle) -> None:
+    snapshot = db.get(DatasetSnapshot, 1)
+    quality = bundle.manifest["dataset"]["quality"]
+    if (
+        snapshot is None
+        or snapshot.dataset_sha256 != bundle.manifest["dataset"]["dataset_sha256"]
+        or (snapshot.users, snapshot.products, snapshot.interactions)
+        != (quality["users"], quality["products"], quality["purchase_events"])
+    ):
+        raise RuntimeError(
+            "Database snapshot differs from model. Seed the matching data into a fresh demo database."
+        )
 
 
-def serialize_recommendations(recommendations) -> list[dict[str, object]]:
-    return [
-        {
-            "product_id": rec.product_id,
-            "product_name": rec.product_name,
-            "category": rec.category,
-            "score": rec.score,
-            "reason": rec.reason,
-        }
-        for rec in recommendations
-    ]
-
-
-def get_recommendations(user_id: str, top_k: int, db: Session) -> tuple[list[RecommendedProduct], str]:
-    recommender = get_recommender()
-    recommendations, strategy = recommender.recommend(user_id=user_id, top_k=top_k)
-    payload = serialize_recommendations(recommendations)
-
-    log = models.RecommendationLog(
+def get_recommendations(
+    bundle: ModelBundle, user_id: str, top_k: int, strategy: str, db: Session
+) -> dict:
+    recs, actual_strategy = bundle.model.recommend(user_id, top_k, strategy)
+    payload = [rec.to_dict() for rec in recs]
+    # Persist what was actually served, including evidence and model identity.
+    log = RecommendationLog(
         user_id=user_id,
         top_k=top_k,
         recommended_products=payload,
-        recommendation_strategy=strategy,
-        request_payload={"user_id": user_id, "top_k": top_k},
+        recommendation_strategy=actual_strategy,
+        model_version=bundle.model.model_version,
+        request_payload={"user_id": user_id, "top_k": top_k, "strategy": strategy},
     )
     db.add(log)
     db.commit()
-
-    return [RecommendedProduct(**item) for item in payload], strategy
-
-
-def get_popular_products(top_k: int = 10) -> list[RecommendedProduct]:
-    recommendations = get_recommender()._popular_recommendations(top_k)
-    return [RecommendedProduct(**item) for item in serialize_recommendations(recommendations)]
-
-
-def get_user_ids() -> list[str]:
-    return get_recommender().get_users()
+    return {
+        "user_id": user_id,
+        "recommended_products": payload,
+        "recommendation_strategy": actual_strategy,
+        "model_version": bundle.model.model_version,
+        "request_id": log.id,
+    }
 
 
-def get_user_history(user_id: str) -> list[dict[str, object]]:
-    return get_recommender().get_user_history(user_id)
-
-
-def get_latest_logs(db: Session, limit: int = 20) -> list[models.RecommendationLog]:
-    return (
-        db.query(models.RecommendationLog)
-        .order_by(models.RecommendationLog.created_at.desc(), models.RecommendationLog.id.desc())
+def get_user_history(db: Session, user_id: str, limit: int) -> list[dict]:
+    query = (
+        select(UserInteraction, Product)
+        .join(Product, Product.product_id == UserInteraction.product_id)
+        .where(UserInteraction.user_id == user_id)
+        .order_by(UserInteraction.timestamp.desc(), UserInteraction.id.desc())
         .limit(limit)
-        .all()
+    )
+    return [
+        {
+            "product_id": event.product_id,
+            "product_name": product.product_name,
+            "category": product.category,
+            "interaction_type": event.interaction_type,
+            "interaction_score": event.interaction_score,
+            "invoice_id": event.invoice_id,
+            "quantity": event.quantity,
+            "unit_price": event.unit_price,
+            "timestamp": event.timestamp.isoformat(),
+        }
+        for event, product in db.execute(query)
+    ]
+
+
+def get_latest_logs(db: Session, limit: int) -> list[RecommendationLog]:
+    return list(
+        db.scalars(
+            select(RecommendationLog)
+            .order_by(RecommendationLog.created_at.desc(), RecommendationLog.id.desc())
+            .limit(limit)
+        )
     )

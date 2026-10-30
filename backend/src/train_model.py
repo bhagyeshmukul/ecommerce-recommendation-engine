@@ -1,72 +1,94 @@
-from __future__ import annotations
+"""Offline entry point: download → clean → validate → test → fit serving bundle."""
 
+from __future__ import annotations
 import argparse
+import importlib.metadata
+import json
+import platform
 from pathlib import Path
 
-from src.data_loader import DOMAIN_CATALOG, generate_multi_domain_ecommerce_data, load_or_generate_dataset
+from src.data_loader import (
+    DATA_DIR,
+    ROOT,
+    catalog_from_events,
+    prepare_dataset,
+    sha256_file,
+)
 from src.evaluate import evaluate_recommender
 from src.recommender import EcommerceRecommender
-from src.utils import save_model, write_json_report
+from src.utils import content_id, save_model, write_json_report
+
+BUNDLE_DIR = ROOT / "models" / "bundle"
 
 
-ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MODEL_PATH = ROOT / "models" / "ecommerce_recommender.joblib"
-DEFAULT_METRICS_PATH = ROOT / "reports" / "training_metrics.json"
-DEFAULT_MANIFEST_PATH = ROOT / "models" / "model_manifest.json"
-
-
-def train_model(
-    output_path: Path = DEFAULT_MODEL_PATH,
-    metrics_path: Path = DEFAULT_METRICS_PATH,
-    manifest_path: Path = DEFAULT_MANIFEST_PATH,
-    regenerate: bool = False,
-) -> dict[str, object]:
-    if regenerate:
-        users, products, interactions = generate_multi_domain_ecommerce_data()
-        data_dir = ROOT / "data"
-        data_dir.mkdir(parents=True, exist_ok=True)
-        users.to_csv(data_dir / "users.csv", index=False)
-        products.to_csv(data_dir / "products.csv", index=False)
-        interactions.to_csv(data_dir / "interactions.csv", index=False)
-    else:
-        users, products, interactions = load_or_generate_dataset()
-
-    recommender = EcommerceRecommender(interactions=interactions, products=products)
-    metrics = evaluate_recommender(interactions=interactions, products=products, k=5)
-    save_model(recommender, output_path)
-    write_json_report(metrics, metrics_path)
-
-    manifest: dict[str, object] = {
-        "model_type": "hybrid_user_item_collaborative_filtering",
-        "artifact": str(output_path.relative_to(ROOT)),
-        "metrics_report": str(metrics_path.relative_to(ROOT)),
-        "dataset": {
-            "users": int(users["user_id"].nunique()),
-            "products": int(products["product_id"].nunique()),
-            "interactions": int(len(interactions)),
-            "domains": sorted(DOMAIN_CATALOG),
-        },
-        "metrics": metrics,
+def train_model(data_dir: Path = DATA_DIR, bundle_dir: Path = BUNDLE_DIR) -> dict:
+    """One bundle binds a real dataset, serving model and historical test report."""
+    events, dataset = prepare_dataset(data_dir)
+    print(
+        f"Cleaned {len(events):,} purchase events from {dataset['quality']['raw_rows']:,} source rows",
+        flush=True,
+    )
+    metrics, neighbors = evaluate_recommender(events)
+    versions = {
+        name: importlib.metadata.version(name)
+        for name in ["pandas", "numpy", "scipy", "scikit-learn", "joblib"]
     }
-    write_json_report(manifest, manifest_path)
+    identity = {
+        "dataset_sha256": dataset["dataset_sha256"],
+        "algorithm": "user_cosine_knn_v1",
+        "neighbors": neighbors,
+        "versions": versions,
+        "python": platform.python_version(),
+    }
+    version = content_id(identity)
+    model = EcommerceRecommender(events, catalog_from_events(events), neighbors)
+    model.model_version = version
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    save_model(model, bundle_dir / "recommender.joblib")
+    metrics.update(
+        {"model_version": version, "dataset_sha256": dataset["dataset_sha256"]}
+    )
+    write_json_report(metrics, bundle_dir / "evaluation.json")
+    manifest = {
+        "model_version": version,
+        "identity": identity,
+        "dataset": dataset,
+        "serving": {
+            "fit_on": "all_cleaned_history",
+            "history_end": dataset["date_end"],
+            "users": len(model.matrix.users),
+            "products": len(model.matrix.products),
+            "neighbors": neighbors,
+            "weight": "log1p(distinct purchase invoices), L2 normalized",
+        },
+        "files": {
+            filename: sha256_file(bundle_dir / filename)
+            for filename in ["recommender.joblib", "evaluation.json"]
+        },
+    }
+    # Write the manifest last: its checksums identify the complete bundle.
+    write_json_report(manifest, bundle_dir / "manifest.json")
+    write_json_report(manifest, ROOT / "models" / "model_manifest.json")
+    write_json_report(metrics, ROOT / "reports" / "training_metrics.json")
+    print(
+        json.dumps(
+            {
+                "model_version": version,
+                "selected_neighbors": neighbors,
+                "test": metrics["collaborative"],
+                "baseline": metrics["popularity"],
+                "cohort": metrics["cohort"],
+            },
+            indent=2,
+        ),
+        flush=True,
+    )
     return manifest
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train and persist the e-commerce recommendation model.")
-    parser.add_argument("--output", type=Path, default=DEFAULT_MODEL_PATH)
-    parser.add_argument("--metrics", type=Path, default=DEFAULT_METRICS_PATH)
-    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST_PATH)
-    parser.add_argument("--regenerate", action="store_true", help="Regenerate the composite dataset before training.")
-    return parser.parse_args()
-
-
 if __name__ == "__main__":
-    args = parse_args()
-    training_manifest = train_model(
-        output_path=args.output,
-        metrics_path=args.metrics,
-        manifest_path=args.manifest,
-        regenerate=args.regenerate,
-    )
-    print(training_manifest)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
+    parser.add_argument("--bundle-dir", type=Path, default=BUNDLE_DIR)
+    args = parser.parse_args()
+    train_model(args.data_dir, args.bundle_dir)

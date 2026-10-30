@@ -1,6 +1,56 @@
 {
-  "precision_at_k": 0.0819,
-  "recall_at_k": 0.4097,
-  "map_at_k": 0.1952,
-  "coverage": 0.8946
+  "k": 10,
+  "cohort": {
+    "target_users": 614,
+    "evaluated_users": 502,
+    "cold_start_users": 41,
+    "users_without_eligible_targets": 71,
+    "target_user_product_pairs": 16172,
+    "cold_start_target_pairs": 930,
+    "previously_seen_target_pairs": 7692,
+    "out_of_catalog_target_pairs": 3,
+    "eligible_target_pairs": 7547,
+    "fallback_users": 0
+  },
+  "collaborative": {
+    "precision_at_k": 0.04183266932270916,
+    "recall_at_k": 0.03896048813394856,
+    "map_at_k": 0.027086218617593114,
+    "ndcg_at_k": 0.05544680167499154,
+    "coverage": 0.16132566420158861
+  },
+  "popularity": {
+    "precision_at_k": 0.02051792828685259,
+    "recall_at_k": 0.021177132778724704,
+    "map_at_k": 0.007924583788805473,
+    "ndcg_at_k": 0.022932914058728545,
+    "coverage": 0.018898931799506986
+  },
+  "ndcg_relative_change_percent": 141.7782647813474,
+  "evaluation_type": "offline_novel_purchase_discovery",
+  "engagement_lift": null,
+  "train_before": "2011-11-01T00:00:00",
+  "validation_start": "2011-11-01T00:00:00",
+  "validation_end_exclusive": "2011-12-01T00:00:00",
+  "test_start": "2011-12-01T00:00:00",
+  "test_end": "2011-12-09T12:50:00",
+  "test_catalog_size": 3651,
+  "selected_neighbors": 50,
+  "validation_runs": [
+    {
+      "n_neighbors": 10,
+      "ndcg_at_k": 0.06938526376063817
+    },
+    {
+      "n_neighbors": 25,
+      "ndcg_at_k": 0.0789120495191861
+    },
+    {
+      "n_neighbors": 50,
+      "ndcg_at_k": 0.08284073337970056
+    }
+  ],
+  "protocol": "Global chronological split; warm users; unseen products; full training catalog; macro averages; no sampled negatives.",
+  "model_version": "f24714941393cb5c",
+  "dataset_sha256": "6b848e5a3b75b970f15e941ca90d9fe4a7a0f1aec65d972ca282d3dc9c2b019f"
 }

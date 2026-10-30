@@ -1,10 +1,16 @@
-from __future__ import annotations
+"""Explainable user-based collaborative filtering with cosine nearest neighbors.
 
-from dataclasses import dataclass
+For each unseen item j, score(u,j) = sum(sim(u,v) * normalized_purchase(v,j))
+                                     / sum(sim(u,v)).
+Scores are ranking signals, not probabilities. Popularity fills missing candidates.
+"""
+
+from __future__ import annotations
+from dataclasses import asdict, dataclass, field
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.neighbors import NearestNeighbors
 
 from src.preprocessing import create_user_item_matrix
 
@@ -13,121 +19,161 @@ from src.preprocessing import create_user_item_matrix
 class Recommendation:
     product_id: str
     product_name: str
-    category: str
+    category: str | None
     score: float
     reason: str
+    source: str = "user_cosine"
+    supporting_users: int = 0
+    evidence: list[dict] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
 
 
 class EcommerceRecommender:
-    def __init__(self, interactions: pd.DataFrame, products: pd.DataFrame):
-        self.interactions = interactions.copy()
-        self.products = products.copy()
-        self.user_item_matrix = create_user_item_matrix(self.interactions)
-        self.user_similarity = self._cosine_frame(self.user_item_matrix)
-        self.item_similarity = self._cosine_frame(self.user_item_matrix.T)
-        self.popular_products = self._build_popular_products()
+    """Fit once, query many times. No dense user-user or item-item matrix is stored."""
 
-    @staticmethod
-    def _cosine_frame(matrix: pd.DataFrame) -> pd.DataFrame:
-        if matrix.empty:
-            return pd.DataFrame(index=matrix.index, columns=matrix.index, dtype=float)
-        values = cosine_similarity(matrix.values)
-        return pd.DataFrame(values, index=matrix.index, columns=matrix.index)
-
-    def _build_popular_products(self) -> pd.DataFrame:
-        popularity = (
-            self.interactions.groupby("product_id")["interaction_score"]
-            .sum()
-            .rename("computed_popularity")
-            .reset_index()
+    def __init__(
+        self, interactions: pd.DataFrame, products: pd.DataFrame, n_neighbors: int = 25
+    ):
+        if n_neighbors < 1:
+            raise ValueError("n_neighbors must be positive")
+        self.matrix = create_user_item_matrix(interactions)
+        self.n_neighbors = n_neighbors
+        self.user_lookup = {user: i for i, user in enumerate(self.matrix.users)}
+        self.product_lookup = {
+            product: i for i, product in enumerate(self.matrix.products)
+        }
+        self.products = (
+            products.set_index("product_id").loc[self.matrix.products].copy()
         )
-        products = self.products.merge(popularity, on="product_id", how="left")
-        products["computed_popularity"] = products["computed_popularity"].fillna(0.0)
-        products["popularity_score"] = products.get("popularity_score", products["computed_popularity"])
-        products["popularity_score"] = products["popularity_score"].fillna(products["computed_popularity"])
-        return products.sort_values(["computed_popularity", "product_id"], ascending=[False, True])
+        self.index = NearestNeighbors(metric="cosine", algorithm="brute", n_jobs=1).fit(
+            self.matrix.normalized
+        )
+        # Distinct buyers resist bulk quantity distortion and form the common baseline.
+        self.popularity = np.asarray((self.matrix.values > 0).sum(axis=0)).ravel()
+        self.popular_order = sorted(
+            range(len(self.matrix.products)),
+            key=lambda i: (-self.popularity[i], self.matrix.products[i]),
+        )
+        self.model_version = "unversioned"
 
     def get_users(self) -> list[str]:
-        return list(self.user_item_matrix.index)
+        return self.matrix.users.copy()
 
-    def get_user_history(self, user_id: str) -> list[dict[str, object]]:
-        history = self.interactions[self.interactions["user_id"] == user_id].merge(
-            self.products[["product_id", "product_name", "category"]],
-            on="product_id",
-            how="left",
+    def seen_indices(self, user_id: str) -> set[int]:
+        if user_id not in self.user_lookup:
+            return set()
+        return set(self.matrix.values[self.user_lookup[user_id]].indices.tolist())
+
+    def neighbors(self, user_id: str, limit: int | None = None) -> list[dict]:
+        """Remove self by identity; identical vectors can have a different tie order.
+
+        Query all distances for one user, then sort by similarity and stable ID.
+        This guarantees deterministic ties without storing an O(users²) matrix.
+        """
+        if user_id not in self.user_lookup:
+            return []
+        row = self.user_lookup[user_id]
+        distances, indices = self.index.kneighbors(
+            self.matrix.normalized[row], n_neighbors=len(self.matrix.users)
         )
-        history = history.sort_values("timestamp", ascending=False)
-        return history[
-            ["product_id", "product_name", "category", "interaction_type", "interaction_score", "timestamp"]
-        ].assign(timestamp=lambda df: df["timestamp"].astype(str)).to_dict(orient="records")
+        # Clip once as an array rather than invoking NumPy for every scalar.
+        similarities = np.clip(1 - distances[0], 0, 1)
+        candidates = [
+            (int(i), float(similarity))
+            for i, similarity in zip(indices[0], similarities)
+            if int(i) != row and similarity > 1e-12
+        ]
+        candidates.sort(
+            key=lambda pair: (-round(pair[1], 12), self.matrix.users[pair[0]])
+        )
+        selected = candidates[: min(limit or self.n_neighbors, self.n_neighbors)]
+        return [
+            {"user_id": self.matrix.users[i], "similarity": similarity}
+            for i, similarity in selected
+        ]
 
-    def recommend(self, user_id: str, top_k: int = 5) -> tuple[list[Recommendation], str]:
-        top_k = max(1, min(int(top_k), 50))
-        if user_id not in self.user_item_matrix.index:
-            return self._popular_recommendations(top_k), "popularity"
+    def _recommendation(
+        self,
+        index: int,
+        score: float,
+        source: str,
+        evidence: list[dict] | None = None,
+        supporting_users: int = 0,
+    ) -> Recommendation:
+        product_id = self.matrix.products[index]
+        product = self.products.loc[product_id]
+        evidence = evidence or []
+        return Recommendation(
+            product_id=product_id,
+            product_name=str(product.product_name),
+            category=None,
+            score=round(float(score), 6),
+            reason=(
+                f"Purchased by {supporting_users} similar customer{'s' if supporting_users != 1 else ''}"
+                if source == "user_cosine"
+                else "Popular with customers across the store"
+            ),
+            source=source,
+            supporting_users=supporting_users,
+            evidence=evidence,
+        )
 
-        user_based = self._user_based_scores(user_id)
-        item_based = self._item_based_scores(user_id)
-        combined = user_based.add(item_based, fill_value=0.0).sort_values(ascending=False)
+    def popular_recommendations(
+        self, top_k: int, exclude: set[int] | None = None
+    ) -> list[Recommendation]:
+        """Popularity scores are buyer counts; do not compare them with cosine scores."""
+        excluded = exclude or set()
+        chosen = [i for i in self.popular_order if i not in excluded][:top_k]
+        return [
+            self._recommendation(i, self.popularity[i], "popularity") for i in chosen
+        ]
 
-        seen_products = set(self.interactions.loc[self.interactions["user_id"] == user_id, "product_id"])
-        combined = combined.drop(labels=list(seen_products), errors="ignore")
-        combined = combined[combined > 0]
-
-        if combined.empty:
-            return self._popular_recommendations(top_k, exclude=seen_products), "popularity"
-
-        products_by_id = self.products.set_index("product_id")
-        recommendations: list[Recommendation] = []
-        for product_id, score in combined.head(top_k).items():
-            if product_id not in products_by_id.index:
-                continue
-            product = products_by_id.loc[product_id]
-            reason = (
-                "Similar item to your previous interaction"
-                if item_based.get(product_id, 0.0) >= user_based.get(product_id, 0.0)
-                else "Similar users liked this product"
-            )
+    def recommend(
+        self, user_id: str, top_k: int = 5, strategy: str = "collaborative"
+    ) -> tuple[list[Recommendation], str]:
+        if not 1 <= top_k <= 50:
+            raise ValueError("top_k must be between 1 and 50")
+        if strategy not in {"collaborative", "popularity"}:
+            raise ValueError("Unknown strategy")
+        seen = self.seen_indices(user_id)
+        neighbors = self.neighbors(user_id) if strategy == "collaborative" else []
+        if not neighbors:
+            return self.popular_recommendations(top_k, seen), "popularity"
+        rows = [self.user_lookup[neighbor["user_id"]] for neighbor in neighbors]
+        similarities = np.array([neighbor["similarity"] for neighbor in neighbors])
+        contributions = (
+            self.matrix.normalized[rows].multiply(similarities[:, None]).tocsr()
+        )
+        scores = np.asarray(contributions.sum(axis=0)).ravel() / similarities.sum()
+        candidates = [int(i) for i in np.flatnonzero(scores > 0) if int(i) not in seen]
+        candidates.sort(
+            key=lambda i: (-round(float(scores[i]), 12), self.matrix.products[i])
+        )
+        recommendations = []
+        for i in candidates[:top_k]:
+            column = contributions[:, i].toarray().ravel()
+            supporters = np.flatnonzero(column > 0)
+            best = sorted(
+                supporters, key=lambda n: (-column[n], neighbors[n]["user_id"])
+            )[:3]
+            evidence = [
+                {
+                    "user_id": neighbors[n]["user_id"],
+                    "similarity": round(neighbors[n]["similarity"], 6),
+                    "contribution": round(float(column[n] / similarities.sum()), 6),
+                }
+                for n in best
+            ]
             recommendations.append(
-                Recommendation(
-                    product_id=str(product_id),
-                    product_name=str(product["product_name"]),
-                    category=str(product["category"]),
-                    score=round(float(score), 4),
-                    reason=reason,
+                self._recommendation(
+                    i, scores[i], "user_cosine", evidence, len(supporters)
                 )
             )
-
-        if len(recommendations) < top_k:
-            existing = {rec.product_id for rec in recommendations}.union(seen_products)
-            recommendations.extend(self._popular_recommendations(top_k - len(recommendations), exclude=existing))
-        return recommendations[:top_k], "hybrid_collaborative_filtering"
-
-    def _user_based_scores(self, user_id: str) -> pd.Series:
-        similarities = self.user_similarity.loc[user_id].drop(labels=[user_id], errors="ignore")
-        if similarities.empty or np.isclose(similarities.sum(), 0.0):
-            return pd.Series(dtype=float)
-        weighted_scores = similarities @ self.user_item_matrix.loc[similarities.index]
-        return pd.Series(weighted_scores, index=self.user_item_matrix.columns) / max(float(similarities.sum()), 1e-9)
-
-    def _item_based_scores(self, user_id: str) -> pd.Series:
-        user_vector = self.user_item_matrix.loc[user_id]
-        interacted = user_vector[user_vector > 0]
-        if interacted.empty:
-            return pd.Series(dtype=float)
-        item_scores = self.item_similarity.loc[interacted.index].T @ interacted
-        return pd.Series(item_scores, index=self.item_similarity.columns) / max(float(interacted.sum()), 1e-9)
-
-    def _popular_recommendations(self, top_k: int, exclude: set[str] | None = None) -> list[Recommendation]:
-        exclude = exclude or set()
-        rows = self.popular_products[~self.popular_products["product_id"].isin(exclude)].head(top_k)
-        return [
-            Recommendation(
-                product_id=str(row.product_id),
-                product_name=str(row.product_name),
-                category=str(row.category),
-                score=round(float(row.computed_popularity), 4),
-                reason="Popular product fallback",
-            )
-            for row in rows.itertuples(index=False)
-        ]
+        chosen = {self.product_lookup[rec.product_id] for rec in recommendations}
+        recommendations.extend(
+            self.popular_recommendations(top_k - len(recommendations), seen | chosen)
+        )
+        actual_strategy = "user_cosine" if candidates else "popularity"
+        return recommendations, actual_strategy

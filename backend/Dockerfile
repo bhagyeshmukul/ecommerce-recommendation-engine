@@ -1,19 +1,10 @@
-FROM python:3.11-slim
-
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
+# Match the local/CI Python minor version; install wheels instead of compiling ML.
+FROM python:3.14-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
+RUN pip install --no-cache-dir --only-binary=:all: -r requirements.txt
 COPY . .
 RUN chmod +x entrypoint.sh
-
 EXPOSE 8000
 CMD ["./entrypoint.sh"]

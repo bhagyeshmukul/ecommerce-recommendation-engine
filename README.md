@@ -1,257 +1,200 @@
-# E-commerce Recommendation Engine
+# Basket · Retail Recommendation Lab
 
-A production-style full-stack recommendation system that serves personalized product recommendations from a FastAPI backend and visualizes them in a React dashboard. The project includes collaborative filtering, cold-start fallback logic, evaluation metrics, PostgreSQL logging, Alembic migrations, Docker Compose, and pytest coverage.
+An explainable e-commerce recommendation engine built with **Python, Pandas and Scikit-Learn**, served by FastAPI and explored through a React dashboard.
 
-## Business Problem
+The model learns from real historical purchases: customers with similar purchase patterns help rank products a customer has not bought before. Each personalized suggestion shows up to three strongest contributing customers and their cosine similarity. A chronological offline evaluation compares the model with a popularity baseline.
 
-E-commerce teams need to increase product discovery, conversion, and repeat engagement. A recommendation engine turns user behavior such as views, clicks, ratings, and purchases into ranked product suggestions that can be used on home pages, product detail pages, email campaigns, and personalized storefronts.
+![Dashboard showing personalized recommendations and their supporting evidence](docs/screenshots/dashboard.png)
 
-## Recommendation Systems
+[Mobile preview](docs/screenshots/mobile.png)
 
-Recommendation systems estimate which items a user is likely to prefer. This project uses collaborative filtering, which learns from patterns across users and products instead of relying only on manually defined rules.
+## Run the complete demo
 
-## Collaborative Filtering
+Prerequisites: Docker Desktop / Docker Engine with Compose, an internet connection for the first download, and available ports **5173**, **8000**, and **55432**.
 
-The backend builds a user-item interaction matrix where rows are users, columns are products, and values are weighted interaction scores. Purchases receive more weight than clicks, and clicks receive more weight than views. The recommender combines:
+```bash
+./scripts/demo.sh
+```
 
-- User-based collaborative filtering: similar users liked this product.
-- Item-based collaborative filtering: this product is similar to something the user already interacted with.
-- Popularity fallback: cold-start users receive high-engagement products.
+The script explicitly downloads the attributed dataset, cleans purchases, selects the neighborhood size, evaluates the model, saves a serving bundle, then starts PostgreSQL, migrations, database seeding, the API, and the built frontend. The first run takes longer because it downloads dependencies and the 23 MB workbook and trains the model.
 
-## Cosine Similarity
+- Dashboard: http://localhost:5173
+- Interactive API documentation: http://localhost:8000/docs
+- Readiness: http://localhost:8000/ready
 
-Cosine similarity measures the angle between two vectors. In this project, user vectors represent product interactions and item vectors represent users who interacted with each product. Higher cosine similarity means two users or products have more similar behavior patterns.
+Subsequent starts can reuse the prepared artifacts:
 
-## Cold Start
+```bash
+docker compose up -d --wait
+# Stop containers while keeping purchases and logs:
+docker compose down
+```
 
-Cold-start users have no historical interactions, so collaborative filtering cannot infer preferences. The API detects unknown users and returns popularity-based recommendations with the reason `Popular product fallback`.
+The `retail_postgres_v2` volume is separate from the previous synthetic demo volume. Seeding refuses to overwrite an unrelated or mismatched dataset. No volume deletion is needed for normal setup.
 
-## Dataset
+## What the dashboard demonstrates
 
-The project generates a realistic synthetic e-commerce dataset with:
+- Search and select an existing customer, or choose **New customer** to demonstrate cold start.
+- Compare **Collaborative filtering** with **Popularity baseline** for the same customer.
+- Request five or ten unseen products and expand **Why this recommendation?** to inspect actual contributing neighbors.
+- Review purchase history, nearest customers, historical evaluation, popular products, and persisted request logs.
+- Explore on desktop or mobile; loading, API failure, no-history and no-candidate states are handled explicitly.
 
-- Users
-- Products
-- Product categories
-- Views, clicks, ratings, and purchases
-- Weighted interaction scores
-- Timestamps
-
-Generated CSV files are stored under `backend/data/` at runtime and ignored by Git.
+Product monograms are visual placeholders, not photographs of source products. The source does not provide categories or images.
 
 ## Architecture
 
-```text
-React + Vite Dashboard
-        |
-        | Axios
-        v
-FastAPI Recommendation API
-        |
-        | SQLAlchemy ORM
-        v
-PostgreSQL
-
-ML pipeline:
-data_loader -> preprocessing -> recommender -> evaluate -> API service
+```mermaid
+flowchart LR
+    UCI[UCI workbook] --> Clean[Clean and audit purchases]
+    Clean --> Eval[Chronological evaluation]
+    Clean --> Fit[Fit sparse user model]
+    Eval --> Bundle[Versioned model bundle]
+    Fit --> Bundle
+    Clean --> Seed[Transactional database seed]
+    Seed --> PG[(PostgreSQL)]
+    Bundle --> API[FastAPI]
+    API --> PG
+    UI[React dashboard] --> API
 ```
 
-## Database And Migrations
+The offline pipeline owns data processing, parameter selection, evaluation and training. API startup validates the saved bundle and the database fingerprint. Requests never download data, retrain, or recalculate evaluation metrics. PostgreSQL stores catalog metadata, purchase histories, dataset identity and served recommendation logs.
 
-PostgreSQL is managed with Docker Compose. SQLAlchemy stores ORM model definitions in `backend/app/db/models.py`, connection logic in `backend/app/db/database.py`, and session lifecycle in `backend/app/db/session.py`.
+### Recommendation algorithm
 
-Schema creation is handled by Alembic only. The application does not rely on `Base.metadata.create_all()` for production schema creation.
+1. Count **distinct purchase invoices** per customer/product pair.
+2. Transform counts with `log(1 + count)` and build a SciPy sparse matrix. A missing entry means unobserved preference, not a dislike.
+3. L2-normalize each customer vector and find cosine nearest neighbors using Scikit-Learn.
+4. Exclude the requesting customer and zero-similarity neighbors. Rank unseen products by the similarity-weighted average of neighbors' normalized purchase strengths.
+5. Fill any remaining slots with popularity, ranked by distinct purchasing customers. The same seen-product exclusions apply to both methods.
 
-Alembic creates:
+Repeated purchases provide a stronger signal, while raw bulk quantities do not distort preference strength. Self exclusion and ID-based tie-breaking keep results deterministic. Only one customer's distances are computed at a time; a dense all-user or all-product similarity matrix is never stored. Exact neighbor search still scans the user population and is intended for this dataset scale.
 
-- `users`
-- `products`
-- `user_interactions`
-- `recommendation_logs`
+**Scores are ranking signals, not purchase probabilities.** Popularity scores are distinct-buyer counts and have different units from collaborative scores. Each returned product identifies its source.
 
-The backend container runs:
+## Real dataset and cleaning
+
+[UCI Online Retail](https://archive.ics.uci.edu/dataset/352/online-retail) contains 541,909 invoice lines from a UK retailer between December 2010 and December 2011. Many customers are wholesalers. Attribution: **Chen, D. (2015). Online Retail. UCI Machine Learning Repository. https://doi.org/10.24432/C5BW33**. Dataset license: **CC BY 4.0**.
+
+The pipeline verifies the original workbook's SHA-256, removes missing/blank identifiers or descriptions, invalid dates, cancellations, nonpositive/nonfinite quantity or price, non-merchandise stock codes, and exact duplicate lines. It then combines repeated lines within an invoice/product. Merchandise codes must have five digits with an optional one- or two-letter suffix; postage, fees, manual adjustments and vouchers are excluded.
+
+Cleaning counts, hashes, source attribution and dates are recorded in `backend/models/model_manifest.json`. Returns are excluded as invalid positive-purchase signals; this is **not** a net-return or profit model. Source timestamps are kept as supplied local wall-clock times for chronological splitting; no precise source timezone is inferred.
+
+Raw data, processed CSVs, and model binaries are ignored by Git and reproducibly rebuilt. Only small provenance and evaluation reports are committed. No click events, ratings, product categories, or online engagement results are invented.
+
+## Evaluation
+
+The task is **novel-product discovery for returning customers**, not repeat-purchase prediction.
+
+| Stage | History available | Evaluation period |
+| --- | --- | --- |
+| Parameter selection | Before 1 November 2011 | November 2011 |
+| Final offline test | Before 1 December 2011 | December 2011 through the source end |
+| Serving demo | All cleaned purchases | Interactive exploration only |
+
+Neighbor counts `{10, 25, 50}` compete on validation NDCG@10. The best configuration is locked, refitted through November, and tested on December. Exact validation ties prefer fewer neighbors.
+
+Both methods rank the **full training catalog**, exclude already-purchased products, and use the same eligible customers and target products. Metrics are macro averages over returning customers with at least one previously unpurchased target in the training catalog. New customers, previously purchased targets and unavailable products are counted separately in the report. Coverage measures distinct recommended products divided by test-catalog size. Precision uses a denominator of ten even when fewer candidates are available.
+
+<!-- RESULTS:START -->
+| Metric | Collaborative filtering | Popularity |
+| --- | ---: | ---: |
+| Precision@10 | 0.041833 | 0.020518 |
+| Recall@10 | 0.038960 | 0.021177 |
+| MAP@10 | 0.027086 | 0.007925 |
+| NDCG@10 | 0.055447 | 0.022933 |
+| Catalog coverage | 0.161326 | 0.018899 |
+
+Evaluated **502** of 614 December customers: 41 were new and 71 had no eligible discovery targets. The test catalog contains 3,651 products. Selected neighborhood: **50**. NDCG@10 improved **141.8% relative to popularity** on this offline cohort. Absolute scores remain modest: Precision@10 is 4.18%; this is a sparse discovery task, not a claim of high overall prediction accuracy.
+
+The serving snapshot contains **4,334 customers**, **3,659 products**, and **386,326 purchase events**. Model version: `f24714941393cb5c`. See the [complete evaluation report](backend/reports/training_metrics.json) and [data/model manifest](backend/models/model_manifest.json).
+<!-- RESULTS:END -->
+
+These are **offline ranking metrics**. They do not measure engagement, click-through, conversion or revenue lift. Establishing those outcomes would require real impression/outcome logging and a controlled online experiment. The dashboard's evaluation remains the frozen historical report even though its serving model uses all history.
+
+## API
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /recommend/{user_id}?top_k=5&strategy=collaborative` | Ranked suggestions, evidence, model version, request ID; logs the served result |
+| `GET /recommend/{user_id}?strategy=popularity` | Popularity comparison with the same seen-item exclusions |
+| `GET /users?q=123&limit=50` | Search customer IDs; limit up to 5,000 |
+| `GET /users/{user_id}/history?limit=20` | Most recent purchases; limit up to 100 |
+| `GET /users/{user_id}/neighbors?limit=5` | Most similar customers; at most ten and at most the fitted neighbor count |
+| `GET /products/popular?top_k=5` | Store-wide favorites |
+| `GET /model` | Dataset provenance, serving snapshot and artifact identity |
+| `GET /metrics` | Frozen historical test report and baseline comparison |
+| `GET /recommendation-logs?limit=10` | Latest served requests; limit up to 100 |
+| `GET /health`, `GET /ready` | Liveness and database/model readiness |
+
+Recommendation count must be between 1 and 50. Unknown customers receive popularity results and empty history/neighbors. Requests can return fewer products if the unseen catalog is exhausted. Customer IDs accept letters, digits, hyphens and underscores, up to 64 characters. Database failures return a clear HTTP 503 rather than a successful but unlogged recommendation.
 
 ```bash
-alembic upgrade head
-python -m src.seed_database
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+curl 'http://localhost:8000/recommend/12347?top_k=5'
+curl 'http://localhost:8000/recommend/NEW_CUSTOMER?top_k=5'
+curl 'http://localhost:8000/metrics'
 ```
 
-## API Endpoints
+`/metrics` now returns explicit `collaborative`, `popularity`, `cohort` and protocol sections instead of the original unversioned four-number payload. The accompanying frontend uses this v2 contract. Recommendation responses retain their original core fields and add model/request identity and per-product evidence.
 
-### `GET /recommend/{user_id}?top_k=5`
+## Develop locally
 
-Returns personalized recommendations and logs the request to PostgreSQL.
-
-```json
-{
-  "user_id": "U0001",
-  "recommended_products": [
-    {
-      "product_id": "P0012",
-      "product_name": "Smart Headphones 12",
-      "category": "Electronics",
-      "score": 4.82,
-      "reason": "Similar users liked this product"
-    }
-  ],
-  "recommendation_strategy": "hybrid_collaborative_filtering"
-}
-```
-
-### `GET /users`
-
-Returns available user IDs.
-
-### `GET /products/popular`
-
-Returns popular products for fallback and dashboard display.
-
-### `GET /users/{user_id}/history`
-
-Returns recent user interactions.
-
-### `GET /metrics`
-
-Returns `precision_at_k`, `recall_at_k`, `map_at_k`, and `coverage`.
-
-### `GET /recommendation-logs`
-
-Returns latest recommendation requests logged in PostgreSQL.
-
-## Frontend
-
-The React dashboard includes:
-
-- User selector
-- Recommended product cards
-- Recommendation score and reason
-- User interaction history
-- Popular products
-- Metrics chart with Recharts
-- Latest recommendation logs table
-- Loading and error states
-
-Screenshot placeholders:
-
-```text
-docs/screenshots/dashboard.png
-docs/screenshots/recommendation-cards.png
-docs/screenshots/logs-table.png
-```
-
-## Run With Docker Compose
+Use **Python 3.14** and **Node 24**. The pinned scientific dependencies replace the original Python-incompatible package set.
 
 ```bash
-docker compose up --build
-```
-
-Open:
-
-- Frontend: `http://localhost:5173`
-- Backend API docs: `http://localhost:8000/docs`
-- PostgreSQL: `localhost:5432`
-
-## Run Backend Locally
-
-```bash
-cd backend
-python -m venv .venv
+python3.14 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-export DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/ecommerce_recommendations
+pip install --only-binary=:all: -r backend/requirements.txt
+# Start only PostgreSQL in Docker:
+docker compose up -d --wait postgres
+cd backend
+python -m src.train_model
 alembic upgrade head
 python -m src.seed_database
-uvicorn app.main:app --reload
+uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-## Run Frontend Locally
+In another terminal:
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
-For local frontend calls directly to the backend:
+Local PostgreSQL defaults to port 55432. `DATABASE_URL`, `MODEL_BUNDLE_DIR` and `CORS_ORIGINS` configure the host API. The frontend defaults to `/api`; Vite proxies to `http://127.0.0.1:8000` locally and `http://backend:8000` in Compose. `VITE_API_BASE_URL` can point to a different API when building; direct browser origins must also be allowed by backend CORS. See `.env.example` for defaults.
+
+To retrain, stop the API, run the training command, and restart it with the matching snapshot. Repeating training on identical source data, Python version and package versions keeps the model identity stable. Changing the processed dataset requires a matching fresh demo database; the seeder deliberately does not silently replace historical rows.
+
+## Tests
 
 ```bash
-VITE_API_BASE_URL=http://localhost:8000 npm run dev
+# From backend/, with the project environment active:
+python -m pytest -q
+# Include real PostgreSQL migrations (an isolated temporary schema is used):
+TEST_DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:55432/ecommerce_recommendations python -m pytest -q
+
+# From frontend/, while the seeded API is running:
+npm ci
+npx playwright install chromium
+npm run build
+npm test
 ```
 
-## Run Alembic Manually
+Backend tests use deterministic tiny purchases and never generate the full dataset. They cover cleaning, sparse weighting, hand-computed cosine scores, actual contribution evidence, deterministic exclusions/fallback, temporal splits, validation-only parameter selection, metrics, artifact identity, transactional seeding, API contracts and PostgreSQL migration preservation. Browser tests exercise customer search, evidence, baseline comparison, cold start, request races, error recovery, and desktop/mobile layouts against the real API.
 
-```bash
-cd backend
-alembic upgrade head
-alembic current
-alembic history
-```
+Playwright's current bundled browsers require a supported host OS. On older macOS, `PLAYWRIGHT_CHROMIUM_EXECUTABLE` can select an existing compatible Chromium executable; the test runner stays on the current pinned version. CI uses the current bundled Linux browser and exercises the built frontend.
 
-Create a new migration:
+With the demo running, `node scripts/capture.mjs` from `frontend/` recreates the desktop and mobile README screenshots using the same browser configuration.
 
-```bash
-alembic revision -m "describe change"
-```
+GitHub Actions runs unit/integration tests, trains the attributed dataset, migrates/seeds PostgreSQL, builds the frontend and runs browser tests. Actual test results are required before publishing changes.
 
-## Run Tests
+## Read the code
 
-```bash
-cd backend
-pytest
-```
+Start with `backend/src/data_loader.py`, then `preprocessing.py`, `recommender.py`, `evaluate.py`, and `train_model.py`. Follow a request from `backend/app/api/recommendation_routes.py` through `services/recommendation_service.py` to the model and database. The dashboard entry point is `frontend/src/pages/RecommendationDashboard.jsx`.
 
-Tests cover matrix creation, cosine similarity, recommendation output, cold-start fallback, FastAPI endpoints, database logging, and recommendation logs.
+Meaningful branches, mathematical operations and lifecycle boundaries have comments/docstrings explaining **why**, alongside named functions explaining what happens.
 
-## Project Structure
+## Limitations
 
-```text
-backend/
-  app/
-    api/
-    db/
-    schemas/
-    services/
-  src/
-  tests/
-  alembic/
-frontend/
-  src/
-docker-compose.yml
-README.md
-```
-
-## Resume Bullet Points
-
-- Built an end-to-end recommendation engine using FastAPI, Scikit-Learn, PostgreSQL, Alembic, React, and Docker Compose.
-- Implemented hybrid collaborative filtering with user-based and item-based cosine similarity plus cold-start popularity fallback.
-- Designed production-style API endpoints with SQLAlchemy logging and Alembic-managed PostgreSQL migrations.
-- Created a React analytics dashboard showing recommendations, user history, model metrics, popular products, and request logs.
-- Added pytest coverage for ML matrix generation, similarity computation, recommendations, API behavior, and database logging.
-
-## Interview Explanation
-
-This project demonstrates how to move recommendation logic from a notebook into a service-oriented application. The ML pipeline creates a user-item matrix, computes cosine similarity, ranks unseen products, explains recommendation reasons, evaluates ranking quality, and exposes the result through FastAPI. PostgreSQL stores recommendation request logs for observability, while Alembic manages schema changes in a repeatable deployment workflow.
-
-## Interview Questions And Answers
-
-**Q: Why use collaborative filtering?**  
-A: It captures behavioral patterns across users and products without requiring deep product metadata.
-
-**Q: How do you avoid recommending products a user already interacted with?**  
-A: The recommender filters seen product IDs before returning the top ranked items.
-
-**Q: How do you handle a new user?**  
-A: Unknown users receive popularity-based recommendations until enough behavior is collected.
-
-**Q: Why cosine similarity?**  
-A: It compares interaction vectors by direction, which works well for sparse user-item preference patterns.
-
-**Q: What is coverage?**  
-A: Coverage measures how much of the catalog appears in recommendations. It helps detect systems that over-recommend only a few popular items.
-
-**Q: Why use Alembic?**  
-A: Alembic provides versioned, repeatable schema migrations, which are safer and more auditable than ad hoc table creation.
-
-**Q: How would you improve this in production?**  
-A: Add scheduled model training, feature stores, offline ranking evaluation, A/B testing, monitoring, authentication, request tracing, and a real event ingestion pipeline.
+This is a local portfolio application with a historical snapshot, not a live storefront. There is no event-ingestion API, online model update, authentication or public hosting. A new customer needs behavior collection before collaborative filtering can personalize; a new product needs purchase evidence. Purchase history has exposure bias, and an unobserved product is not necessarily irrelevant. The wholesale-heavy source may not generalize to a different retailer. Exact neighbor search and the single-process model should be replaced or scaled for substantially larger populations.

@@ -1,17 +1,30 @@
+import { TrendingUp } from "lucide-react";
+
 export default function PopularProducts({ products }) {
   return (
-    <section className="panel">
-      <div className="panel-header">
-        <h2>Popular Products</h2>
+    <section className="panel" aria-labelledby="popular-title">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">THE BASELINE</p>
+          <h2 id="popular-title">Store favorites</h2>
+        </div>
+        <TrendingUp size={20} />
       </div>
-      <div className="popular-list">
-        {products.slice(0, 6).map((product) => (
-          <div key={product.product_id} className="popular-item">
-            <span>{product.product_name}</span>
-            <strong>{Number(product.score).toFixed(1)}</strong>
-          </div>
+      <p className="muted small-copy">
+        Ranked by distinct purchasing customers.
+      </p>
+      <ol className="popular-list">
+        {products.slice(0, 5).map((product, i) => (
+          <li key={product.product_id}>
+            <span className="list-rank">{i + 1}</span>
+            <span>{product.product_name.toLowerCase()}</span>
+            <strong>
+              {product.score.toLocaleString()}
+              <small> buyers</small>
+            </strong>
+          </li>
         ))}
-      </div>
+      </ol>
     </section>
   );
 }

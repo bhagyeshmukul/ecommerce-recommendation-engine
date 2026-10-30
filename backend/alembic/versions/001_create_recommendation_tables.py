@@ -1,3 +1,4 @@
+"""Original PostgreSQL schema; the v2 purchase changes are a separate migration."""
 from __future__ import annotations
 
 from alembic import op

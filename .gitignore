@@ -5,13 +5,19 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
-backend/data/*.csv
-backend/models/*.joblib
-!backend/models/ecommerce_recommender.joblib
-backend/reports/*.json
-!backend/reports/training_metrics.json
 .env
 node_modules/
 dist/
 coverage/
-postgres_data/
+playwright-report/
+test-results/
+*.icloud
+# Data and model binaries are rebuilt by scripts/demo.sh, never committed.
+backend/data/*.csv
+backend/data/raw/
+backend/data/processed/
+backend/models/*.joblib
+backend/models/bundle/
+backend/reports/*.json
+!backend/reports/training_metrics.json
+*.egg-info/

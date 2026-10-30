@@ -1,56 +1,51 @@
-import pandas as pd
+"""Behavior tests protect recommendation meaning, not just response shape."""
 
+import pytest
+from src.data_loader import catalog_from_events
 from src.recommender import EcommerceRecommender
 
 
-def sample_data():
-    products = pd.DataFrame(
-        [
-            {"product_id": "P1", "product_name": "Phone", "category": "Electronics", "popularity_score": 5},
-            {"product_id": "P2", "product_name": "Laptop", "category": "Electronics", "popularity_score": 7},
-            {"product_id": "P3", "product_name": "Shoes", "category": "Fashion", "popularity_score": 10},
-            {"product_id": "P4", "product_name": "Bottle", "category": "Home", "popularity_score": 3},
-        ]
-    )
-    interactions = pd.DataFrame(
-        [
-            {"user_id": "U1", "product_id": "P1", "interaction_type": "purchase", "interaction_score": 5, "timestamp": "2026-01-01"},
-            {"user_id": "U1", "product_id": "P2", "interaction_type": "click", "interaction_score": 2, "timestamp": "2026-01-02"},
-            {"user_id": "U2", "product_id": "P1", "interaction_type": "click", "interaction_score": 2, "timestamp": "2026-01-03"},
-            {"user_id": "U2", "product_id": "P3", "interaction_type": "purchase", "interaction_score": 5, "timestamp": "2026-01-04"},
-            {"user_id": "U3", "product_id": "P2", "interaction_type": "purchase", "interaction_score": 5, "timestamp": "2026-01-05"},
-            {"user_id": "U3", "product_id": "P4", "interaction_type": "click", "interaction_score": 2, "timestamp": "2026-01-06"},
-        ]
-    )
-    return products, interactions
+def test_cosine_and_weighted_scores_have_real_evidence(model):
+    neighbors = model.neighbors("U1")
+    assert [row["user_id"] for row in neighbors] == ["U2", "U3"]
+    assert neighbors[0]["similarity"] == pytest.approx(0.5)
+    recs, strategy = model.recommend("U1", 2)
+    assert strategy == "user_cosine"
+    assert [rec.product_id for rec in recs] == ["P3", "P4"]
+    assert recs[0].score == pytest.approx(0.353553, abs=1e-6)
+    assert recs[0].evidence[0]["user_id"] == "U2"
+    assert recs[0].evidence[0]["contribution"] == recs[0].score
 
 
-def test_cosine_similarity_calculation():
-    products, interactions = sample_data()
-    recommender = EcommerceRecommender(interactions, products)
-
-    assert recommender.user_similarity.loc["U1", "U1"] == 1
-    assert recommender.user_similarity.loc["U1", "U2"] > 0
-
-
-def test_recommendation_output_excludes_seen_products():
-    products, interactions = sample_data()
-    recommender = EcommerceRecommender(interactions, products)
-
-    recommendations, strategy = recommender.recommend("U1", top_k=2)
-
-    assert strategy == "hybrid_collaborative_filtering"
-    assert len(recommendations) == 2
-    assert all(rec.product_id not in {"P1", "P2"} for rec in recommendations)
-    assert all(rec.reason for rec in recommendations)
+def test_seen_exclusion_fallback_and_catalog_exhaustion(model):
+    recs, _ = model.recommend("U1", 50)
+    assert [rec.product_id for rec in recs] == ["P3", "P4", "P5"]
+    assert recs[-1].source == "popularity"
+    assert len({rec.product_id for rec in recs}) == len(recs)
+    assert not {"P1", "P2"} & {rec.product_id for rec in recs}
 
 
-def test_cold_start_fallback():
-    products, interactions = sample_data()
-    recommender = EcommerceRecommender(interactions, products)
-
-    recommendations, strategy = recommender.recommend("NEW_USER", top_k=2)
-
+def test_unknown_and_isolated_users_get_deterministic_popularity(model):
+    recs, strategy = model.recommend("NEW_CUSTOMER", 3)
     assert strategy == "popularity"
-    assert len(recommendations) == 2
-    assert recommendations[0].reason == "Popular product fallback"
+    assert [rec.product_id for rec in recs] == ["P1", "P2", "P3"]
+    assert all(rec.evidence == [] for rec in recs)
+    recs, strategy = model.recommend("U4", 2)
+    assert strategy == "popularity"
+    assert all(rec.product_id != "P5" for rec in recs)
+
+
+def test_self_excluded_even_with_identical_vectors(purchases):
+    twin = purchases.loc[purchases.user_id == "U1"].assign(user_id="TWIN")
+    import pandas as pd
+
+    events = pd.concat([purchases, twin])
+    model = EcommerceRecommender(events, catalog_from_events(events), 2)
+    assert model.neighbors("U1")[0]["user_id"] == "TWIN"
+    assert "U1" not in {row["user_id"] for row in model.neighbors("U1")}
+
+
+@pytest.mark.parametrize("k", [0, -1, 51])
+def test_invalid_top_k_rejected(model, k):
+    with pytest.raises(ValueError):
+        model.recommend("U1", k)

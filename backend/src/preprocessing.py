@@ -1,39 +1,44 @@
+"""Turn purchase histories into compact user preference vectors."""
+
 from __future__ import annotations
+from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
+from scipy.sparse import csr_matrix
+from sklearn.preprocessing import normalize
 
 
-REQUIRED_INTERACTION_COLUMNS = {
-    "user_id",
-    "product_id",
-    "interaction_type",
-    "interaction_score",
-    "timestamp",
-}
+@dataclass
+class InteractionMatrix:
+    """The ordered ID maps are as important as the matrix values when serving."""
+
+    values: csr_matrix
+    normalized: csr_matrix
+    users: list[str]
+    products: list[str]
 
 
-def clean_interactions(interactions: pd.DataFrame) -> pd.DataFrame:
-    missing = REQUIRED_INTERACTION_COLUMNS.difference(interactions.columns)
-    if missing:
-        raise ValueError(f"Missing interaction columns: {sorted(missing)}")
-
-    cleaned = interactions.copy()
-    cleaned = cleaned.dropna(subset=["user_id", "product_id", "interaction_score"])
-    cleaned["user_id"] = cleaned["user_id"].astype(str)
-    cleaned["product_id"] = cleaned["product_id"].astype(str)
-    cleaned["interaction_score"] = pd.to_numeric(cleaned["interaction_score"], errors="coerce").fillna(0.0)
-    cleaned["timestamp"] = pd.to_datetime(cleaned["timestamp"], errors="coerce")
-    cleaned = cleaned.dropna(subset=["timestamp"])
-    return cleaned
-
-
-def create_user_item_matrix(interactions: pd.DataFrame) -> pd.DataFrame:
-    cleaned = clean_interactions(interactions)
-    matrix = cleaned.pivot_table(
-        index="user_id",
-        columns="product_id",
-        values="interaction_score",
-        aggfunc="sum",
-        fill_value=0.0,
+def create_user_item_matrix(events: pd.DataFrame) -> InteractionMatrix:
+    """Use log(1 + distinct invoices) to reflect repeats without wholesale bias."""
+    required = {"user_id", "product_id", "invoice_id"}
+    if required - set(events.columns) or events.empty:
+        raise ValueError(
+            "Nonempty user_id/product_id/invoice_id purchases are required"
+        )
+    if events[list(required)].isna().any().any():
+        raise ValueError("Purchase identifiers cannot be missing")
+    grouped = events.groupby(["user_id", "product_id"])["invoice_id"].nunique()
+    users = sorted(events.user_id.unique().tolist())
+    products = sorted(events.product_id.unique().tolist())
+    user_lookup = {value: index for index, value in enumerate(users)}
+    product_lookup = {value: index for index, value in enumerate(products)}
+    rows = [user_lookup[user] for user, _ in grouped.index]
+    columns = [product_lookup[product] for _, product in grouped.index]
+    values = csr_matrix(
+        (np.log1p(grouped.to_numpy(dtype=float)), (rows, columns)),
+        shape=(len(users), len(products)),
     )
-    return matrix.sort_index(axis=0).sort_index(axis=1)
+    return InteractionMatrix(
+        values, normalize(values, norm="l2", axis=1, copy=True).tocsr(), users, products
+    )

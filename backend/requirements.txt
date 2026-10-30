@@ -1,12 +1,14 @@
-fastapi==0.111.0
-uvicorn[standard]==0.30.1
-pandas==2.2.2
-numpy==1.26.4
-scikit-learn==1.5.0
-SQLAlchemy==2.0.30
-alembic==1.13.1
-psycopg2-binary==2.9.9
-joblib==1.4.2
-pytest==8.2.2
-httpx==0.27.0
-python-dotenv==1.0.1
+# Tested together on Python 3.14. Keep exact versions for reproducible training.
+fastapi==0.162.0
+uvicorn==0.54.0
+pandas==3.1.0
+numpy==2.5.4
+scipy==1.18.1
+scikit-learn==1.9.1
+SQLAlchemy==2.1.6
+alembic==1.20.1
+psycopg2-binary==2.9.13
+joblib==1.6.0
+pytest==9.2.0
+httpx==0.28.1
+openpyxl==3.1.5

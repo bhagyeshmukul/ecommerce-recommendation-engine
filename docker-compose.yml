@@ -1,38 +1,48 @@
+# A separate v2 volume preserves any previous synthetic demo database.
 services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-ecommerce_recommendations}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_DB: ecommerce_recommendations
+      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
+    ports: ["127.0.0.1:${POSTGRES_PORT:-55432}:5432"]
+    volumes: ["retail_postgres_v2:/var/lib/postgresql/data"]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-ecommerce_recommendations}"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ecommerce_recommendations"]
       interval: 5s
       timeout: 5s
-      retries: 10
-
+      retries: 20
+  prepare:
+    build: ./backend
+    command: ["python", "-m", "src.train_model"]
+    volumes:
+      - ./backend/data:/app/data
+      - ./backend/models:/app/models
+      - ./backend/reports:/app/reports
+    profiles: ["setup"]
   backend:
-    build:
-      context: ./backend
+    build: ./backend
     environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-ecommerce_recommendations}
-    ports:
-      - "8000:8000"
+      DATABASE_URL: postgresql+psycopg2://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/ecommerce_recommendations
+    ports: ["127.0.0.1:8000:8000"]
+    volumes:
+      - ./backend/data:/app/data:ro
+      - ./backend/models:/app/models:ro
     depends_on:
-      postgres:
-        condition: service_healthy
-
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready')"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
   frontend:
-    build:
-      context: ./frontend
-    ports:
-      - "5173:5173"
+    build: ./frontend
+    environment:
+      API_PROXY_TARGET: http://backend:8000
+    ports: ["127.0.0.1:5173:5173"]
     depends_on:
-      - backend
-
+      backend: { condition: service_healthy }
 volumes:
-  postgres_data:
+  retail_postgres_v2:

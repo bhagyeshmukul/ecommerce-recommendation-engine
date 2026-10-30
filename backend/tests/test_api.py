@@ -1,53 +1,80 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
-from fastapi.testclient import TestClient
+"""API contracts, observed behavior and dependency failures use an isolated database."""
 
-from app.db.database import Base
-from app.db.session import get_db
-from app.main import app
+import pytest
+from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
+from app.db.models import RecommendationLog
 
 
-engine = create_engine(
-    "sqlite://",
-    connect_args={"check_same_thread": False},
-    poolclass=StaticPool,
-)
-TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base.metadata.create_all(bind=engine)
-
-
-def override_get_db():
-    db = TestingSessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-app.dependency_overrides[get_db] = override_get_db
-client = TestClient(app)
-
-
-def test_recommend_endpoint_logs_request():
-    response = client.get("/recommend/U0001?top_k=3")
-
+def test_recommendations_log_model_and_evidence(client, session_factory):
+    response = client.get("/recommend/U1?top_k=2")
     assert response.status_code == 200
     body = response.json()
-    assert body["user_id"] == "U0001"
-    assert len(body["recommended_products"]) == 3
+    assert body["model_version"] == "test-model"
+    assert body["recommendation_strategy"] == "user_cosine"
+    assert [item["product_id"] for item in body["recommended_products"]] == ["P3", "P4"]
+    assert body["recommended_products"][0]["evidence"]
+    with session_factory() as db:
+        log = db.get(RecommendationLog, body["request_id"])
+        assert log.recommended_products == body["recommended_products"]
+        assert log.model_version == "test-model"
 
 
-def test_users_endpoint():
-    response = client.get("/users")
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/recommend/U1?top_k=0",
+        "/recommend/U1?top_k=51",
+        "/recommend/U1?strategy=magic",
+        "/users?limit=5001",
+        "/users/U1/history?limit=101",
+        "/recommend/space%20id",
+    ],
+)
+def test_validation(client, path):
+    assert client.get(path).status_code == 422
 
-    assert response.status_code == 200
-    assert len(response.json()["users"]) > 0
+
+def test_new_customer_and_baseline(client):
+    cold = client.get("/recommend/NEW_CUSTOMER").json()
+    assert cold["recommendation_strategy"] == "popularity"
+    assert client.get("/users/NEW_CUSTOMER/history").json() == []
+    assert client.get("/users/NEW_CUSTOMER/neighbors").json()["neighbors"] == []
+    baseline = client.get("/recommend/U1?strategy=popularity").json()
+    assert baseline["recommendation_strategy"] == "popularity"
+    assert {row["product_id"] for row in baseline["recommended_products"]}.isdisjoint(
+        {"P1", "P2"}
+    )
 
 
-def test_recommendation_logs_endpoint():
-    client.get("/recommend/U0002?top_k=2")
+def test_metadata_history_metrics_logs_and_readiness(client):
+    assert client.get("/users?q=U1").json()["users"] == ["U1"]
+    assert len(client.get("/users/U1/history?limit=1").json()) == 1
+    assert client.get("/users/U1/neighbors").json()["neighbors"][0][
+        "similarity"
+    ] == pytest.approx(0.5)
+    assert client.get("/model").json()["model_version"] == "test-model"
+    assert client.get("/metrics").json()["k"] == 10
+    assert client.get("/ready").status_code == 200
+    assert client.get("/health").status_code == 200
+    client.get("/recommend/U1")
+    assert client.get("/recommendation-logs?limit=1").json()[0]["user_id"] == "U1"
+
+
+def test_database_failure_returns_service_unavailable(client, monkeypatch):
+    def broken(*args, **kwargs):
+        raise OperationalError("unavailable", {}, None)
+
+    monkeypatch.setattr("app.services.recommendation_service.get_latest_logs", broken)
     response = client.get("/recommendation-logs")
+    assert response.status_code == 503
+    assert "temporarily unavailable" in response.json()["detail"]
 
-    assert response.status_code == 200
-    assert len(response.json()) >= 1
+
+def test_readiness_detects_snapshot_mismatch(client, session_factory):
+    from app.db.models import DatasetSnapshot
+
+    with session_factory() as db:
+        db.get(DatasetSnapshot, 1).dataset_sha256 = "other"
+        db.commit()
+    assert client.get("/ready").status_code == 503

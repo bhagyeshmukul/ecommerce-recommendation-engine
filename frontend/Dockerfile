@@ -1,9 +1,9 @@
-FROM node:20-alpine
-
+# Serve the production build with Vite preview for this local portfolio demo.
+FROM node:24-alpine
 WORKDIR /app
-COPY package*.json ./
-RUN npm install
+COPY package.json package-lock.json .npmrc ./
+RUN npm ci
 COPY . .
-
+RUN npm run build
 EXPOSE 5173
-CMD ["npm", "run", "dev"]
+CMD ["npm", "run", "preview", "--", "--port", "5173"]
